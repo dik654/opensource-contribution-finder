@@ -38,7 +38,7 @@ jobs:
               languages: ['rust', 'go', 'typescript'],
               labels: ['good first issue', 'help wanted'],
               minStars: 50,
-              maxResults: 30,
+              maxResults: 100,  // 30 → 100 (최대치)
               dbFile: 'notified-issues.md',
               maxStoredIssues: 500,
             };
@@ -96,11 +96,9 @@ jobs:
             // ═══════════════════════════════════════════════════════
             
             async function search(language, label) {
-              // created 조건 제거, 단순하게
               const query = `is:issue is:open language:${language} label:"${label}" stars:>=${CONFIG.minStars}`;
               
               console.log(`🔍 [${language}] "${label}"`);
-              console.log(`   Query: ${query}`);
               
               try {
                 const response = await github.rest.search.issuesAndPullRequests({
@@ -110,7 +108,7 @@ jobs:
                   per_page: CONFIG.maxResults
                 });
                 
-                console.log(`   → ${response.data.total_count} found`);
+                console.log(`   → ${response.data.total_count} total, fetched ${response.data.items.length}`);
                 
                 return response.data.items.map(issue => {
                   const repoMatch = issue.repository_url.match(/repos\/(.+)$/);
