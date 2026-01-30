@@ -1,5 +1,7 @@
 # 🌍 기여 가능한 이슈 Discord Notifier
 # 
+# Cosmos SDK EVM, Reth 기반, Commonware 기반 프로젝트들
+#
 # .github/workflows/contribution-issues.yml
 
 name: Contribution-Friendly Issues
@@ -31,31 +33,67 @@ jobs:
             const DISCORD_WEBHOOK = process.env.DISCORD_WEBHOOK;
             
             // ═══════════════════════════════════════════════════════
-            // 🎯 설정
+            // 🎯 프로젝트 목록
             // ═══════════════════════════════════════════════════════
             
-            const CONFIG = {
-              // 검색 쿼리들 (직접 지정)
-              searches: [
-                // Rust 프로젝트
-                { label: 'good first issue', extra: 'repo:rust-lang/rust', name: 'rust-lang/rust' },
-                { label: 'good first issue', extra: 'repo:paradigmxyz/reth', name: 'paradigmxyz/reth' },
-                { label: 'good first issue', extra: 'repo:foundry-rs/foundry', name: 'foundry' },
-                { label: 'E-easy', extra: 'repo:rust-lang/rust', name: 'rust-lang/rust (E-easy)' },
-                
-                // Go 프로젝트  
-                { label: 'good first issue', extra: 'repo:ethereum/go-ethereum', name: 'go-ethereum' },
-                { label: 'help wanted', extra: 'repo:ethereum/go-ethereum', name: 'go-ethereum' },
-                
-                // TypeScript 프로젝트
-                { label: 'good first issue', extra: 'repo:ChainSafe/lodestar', name: 'lodestar' },
-                { label: 'help wanted', extra: 'repo:ChainSafe/lodestar', name: 'lodestar' },
-                
-                // 큰 프로젝트들 (라벨 기반)
-                { label: 'good first issue', extra: 'stars:>1000', name: 'popular (1000+)' },
-                { label: 'help wanted', extra: 'stars:>1000', name: 'popular (1000+)' },
+            const PROJECTS = {
+              // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+              // 🔷 Cosmos SDK EVM 프로젝트들
+              // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+              'cosmos-evm': [
+                'cosmos/evm',           // Cosmos 공식 EVM
+                'evmos/evmos',          // Evmos
+                'sei-protocol/sei-chain', // Sei
+                'InjectiveLabs/injective-core', // Injective
+                'Canto-Network/Canto',  // Canto
+                'crypto-org-chain/cronos', // Cronos
+                'initia-labs/minievm',  // MiniEVM (Initia)
+                'initia-labs/initia',   // Initia
+                'berachain/beacon-kit', // Berachain
+                'berachain/polaris',    // Berachain Polaris EVM
               ],
               
+              // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+              // 🦀 Reth 기반 프로젝트들
+              // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+              'reth-based': [
+                'paradigmxyz/reth',     // Reth 본체
+                'ethereum-optimism/op-reth', // OP Reth
+                'bnb-chain/reth',       // BNB Chain Reth
+                'Galxe/gravity-reth',   // Gravity Reth
+                'worldcoin/world-chain', // World Chain
+              ],
+              
+              // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+              // ⚡ Commonware 기반
+              // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+              'commonware': [
+                'commonwarexyz/monorepo', // Commonware Library
+                'commonwarexyz/alto',     // Alto blockchain
+              ],
+              
+              // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+              // 🔧 관련 도구들
+              // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+              'tools': [
+                'foundry-rs/foundry',   // Foundry
+                'alloy-rs/alloy',       // Alloy
+                'bluealloy/revm',       // Revm
+                'paradigmxyz/alphanet', // Alphanet
+              ],
+            };
+            
+            // 검색할 라벨들
+            const LABELS = [
+              'good first issue',
+              'help wanted',
+              'E-easy',           // rust-lang 스타일
+              'easy',
+              'beginner',
+              'contributor-friendly',
+            ];
+            
+            const CONFIG = {
               maxResults: 100,
               dbFile: 'notified-issues.md',
               maxStoredIssues: 1000,
@@ -83,7 +121,7 @@ jobs:
               if (fs.existsSync(CONFIG.dbFile)) {
                 content = fs.readFileSync(CONFIG.dbFile, 'utf8');
               } else {
-                content = `# Notified Issues\n\n> 자동 생성 파일\n`;
+                content = `# Notified Issues\n\n> 자동 생성 파일 - Cosmos EVM, Reth, Commonware 프로젝트\n`;
               }
               
               if (issues.length > 0) {
@@ -113,35 +151,31 @@ jobs:
             // 🔍 검색
             // ═══════════════════════════════════════════════════════
             
-            async function search(searchConfig) {
-              const query = `is:issue is:open label:"${searchConfig.label}" ${searchConfig.extra}`;
-              
-              console.log(`🔍 [${searchConfig.name}] "${searchConfig.label}"`);
-              console.log(`   Query: ${query}`);
+            async function searchRepo(repo, label) {
+              const query = `is:issue is:open repo:${repo} label:"${label}"`;
               
               try {
                 const response = await github.rest.search.issuesAndPullRequests({
                   q: query,
                   sort: 'updated',
                   order: 'desc',
-                  per_page: CONFIG.maxResults
+                  per_page: 50
                 });
                 
-                console.log(`   → ${response.data.total_count} total, fetched ${response.data.items.length}`);
+                if (response.data.total_count > 0) {
+                  console.log(`   ✓ [${repo}] "${label}": ${response.data.total_count}`);
+                }
                 
-                return response.data.items.map(issue => {
-                  const repoMatch = issue.repository_url.match(/repos\/(.+)$/);
-                  return {
-                    id: String(issue.id),
-                    number: issue.number,
-                    title: issue.title.slice(0, 55),
-                    url: issue.html_url,
-                    repo: repoMatch ? repoMatch[1] : 'unknown',
-                  };
-                });
+                return response.data.items.map(issue => ({
+                  id: String(issue.id),
+                  number: issue.number,
+                  title: issue.title.slice(0, 60),
+                  url: issue.html_url,
+                  repo: repo,
+                }));
                 
               } catch (e) {
-                console.log(`   ❌ ${e.message}`);
+                // 404 등은 무시
                 return [];
               }
             }
@@ -156,12 +190,19 @@ jobs:
             
             const allIssues = [];
             
-            for (const searchConfig of CONFIG.searches) {
-              const issues = await search(searchConfig);
-              allIssues.push(...issues);
+            // 카테고리별 검색
+            for (const [category, repos] of Object.entries(PROJECTS)) {
+              console.log(`\n🔍 Searching ${category}...`);
               
-              // 4초 대기
-              await new Promise(r => setTimeout(r, 4000));
+              for (const repo of repos) {
+                for (const label of LABELS) {
+                  const issues = await searchRepo(repo, label);
+                  allIssues.push(...issues.map(i => ({ ...i, category })));
+                  
+                  // Rate limit 방지: 3초 대기
+                  await new Promise(r => setTimeout(r, 3000));
+                }
+              }
             }
             
             // 중복 제거 & 새 이슈만
@@ -175,23 +216,47 @@ jobs:
               return;
             }
             
-            // Discord Embeds - 레포별 그룹화
-            const byRepo = {};
+            // Discord Embeds - 카테고리별
+            const categoryColors = {
+              'cosmos-evm': 0x2E3148,  // Cosmos 색상
+              'reth-based': 0xE25822,  // Rust 색상
+              'commonware': 0x00D4AA,  // Commonware 색상
+              'tools': 0xF7931A,       // 도구 색상
+            };
+            
+            const categoryEmoji = {
+              'cosmos-evm': '🔷',
+              'reth-based': '🦀',
+              'commonware': '⚡',
+              'tools': '🔧',
+            };
+            
+            const byCategory = {};
             for (const i of newIssues) {
-              if (!byRepo[i.repo]) byRepo[i.repo] = [];
-              byRepo[i.repo].push(i);
+              if (!byCategory[i.category]) byCategory[i.category] = [];
+              byCategory[i.category].push(i);
             }
             
             const embeds = [];
             
-            for (const [repo, issues] of Object.entries(byRepo).slice(0, 10)) {
+            for (const [cat, issues] of Object.entries(byCategory)) {
+              // 레포별 그룹
+              const byRepo = {};
+              for (const i of issues) {
+                if (!byRepo[i.repo]) byRepo[i.repo] = [];
+                byRepo[i.repo].push(i);
+              }
+              
+              const fields = Object.entries(byRepo).slice(0, 5).map(([repo, list]) => ({
+                name: `📦 ${repo.split('/')[1]}`,
+                value: list.slice(0, 3).map(i => `[#${i.number}](${i.url}) ${i.title}`).join('\n'),
+                inline: false
+              }));
+              
               embeds.push({
-                title: `📦 ${repo}`,
-                color: 0x238636,
-                description: issues.slice(0, 5).map(i => 
-                  `[#${i.number}](${i.url}) ${i.title}`
-                ).join('\n'),
-                footer: { text: `${issues.length} issue(s)` }
+                title: `${categoryEmoji[cat] || '📁'} ${cat} — ${issues.length} issues`,
+                color: categoryColors[cat] || 0x6e7681,
+                fields
               });
             }
             
@@ -202,8 +267,8 @@ jobs:
             }
             
             const payload = JSON.stringify({
-              username: '🆕 Issue Finder',
-              content: `## 🎯 새 이슈 ${newIssues.length}개 발견!`,
+              username: '🆕 Blockchain Issue Finder',
+              content: `## 🎯 새 이슈 ${newIssues.length}개 발견!\n> Cosmos EVM | Reth | Commonware`,
               embeds: embeds.slice(0, 10)
             });
             
