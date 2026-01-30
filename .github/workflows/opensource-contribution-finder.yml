@@ -1,316 +1,249 @@
 # 🌍 기여 가능한 이슈 Discord Notifier
 # 
-# GitHub 전체에서 기여하기 좋은 이슈들을 검색!
-# good first issue 뿐만 아니라 다양한 난이도 포함
+# - Rate limit 최대 최적화 (언어당 1회 검색)
+# - MD 파일로 중복 방지
+# - 새 이슈만 알림
 #
-# .github/workflows/contribution-issues.yml 로 저장
+# .github/workflows/contribution-issues.yml
 
 name: Contribution-Friendly Issues
 
 on:
   schedule:
-    - cron: '0 */6 * * *'  # 6시간마다
+    - cron: '0 */6 * * *'
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   notify:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Search and notify contribution-friendly issues
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: Search and notify new issues
         uses: actions/github-script@v7
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         with:
           script: |
             const https = require('https');
-            
+            const fs = require('fs');
             const DISCORD_WEBHOOK = process.env.DISCORD_WEBHOOK;
             
             // ═══════════════════════════════════════════════════════
-            // 🎯 검색 설정
+            // 🎯 설정
             // ═══════════════════════════════════════════════════════
             
             const CONFIG = {
-              // 검색할 언어
+              // 검색할 언어 (원하는 대로 수정)
               languages: ['rust', 'go', 'typescript'],
               
-              // 최소 스타 수
               minStars: 100,
-              
-              // 최근 며칠 내 생성된 이슈
               createdWithinDays: 7,
-              
-              // 언어별 최대 결과 수
-              maxPerSearch: 20,
+              maxResults: 50,
+              dbFile: 'notified-issues.md',
+              maxStoredIssues: 500,
             };
             
             // ═══════════════════════════════════════════════════════
-            // 🏷️ 검색할 라벨들 (난이도별로 분류)
+            // 📁 DB 함수
             // ═══════════════════════════════════════════════════════
             
-            const LABEL_CATEGORIES = {
-              // 🟢 입문자용
-              beginner: [
-                'good first issue',
-                'good-first-issue',
-                'beginner',
-                'beginner-friendly',
-                'first-timers-only',
-                'starter',
-                'easy',
-                'low-hanging-fruit',
-              ],
-              
-              // 🟡 중급 - 도움 요청
-              helpWanted: [
-                'help wanted',
-                'help-wanted',
-                'contributions welcome',
-                'up-for-grabs',
-                'accepting prs',
-              ],
-              
-              // 🔵 문서/테스트 (비교적 쉬움)
-              docs: [
-                'documentation',
-                'docs',
-                'doc',
-                'tests',
-                'testing',
-                'test',
-              ],
-              
-              // 🟠 버그 수정
-              bugs: [
-                'bug',
-                'bugfix',
-                'fix',
-                'defect',
-              ],
-              
-              // 🟣 기능 추가/개선
-              features: [
-                'enhancement',
-                'feature',
-                'improvement',
-                'feature-request',
-              ],
-              
-              // ⚪ 리팩토링/정리
-              cleanup: [
-                'refactor',
-                'refactoring',
-                'cleanup',
-                'tech-debt',
-                'code-quality',
-              ],
-            };
+            function loadNotifiedIssues() {
+              try {
+                if (fs.existsSync(CONFIG.dbFile)) {
+                  const content = fs.readFileSync(CONFIG.dbFile, 'utf8');
+                  const ids = content.match(/<!-- id:(\d+) -->/g) || [];
+                  return new Set(ids.map(s => s.match(/\d+/)[0]));
+                }
+              } catch (e) {}
+              return new Set();
+            }
             
+            function saveNotifiedIssues(issues) {
+              const now = new Date().toISOString().split('T')[0];
+              
+              let content = '';
+              if (fs.existsSync(CONFIG.dbFile)) {
+                content = fs.readFileSync(CONFIG.dbFile, 'utf8');
+              } else {
+                content = `# Notified Issues\n\n> 자동 생성 파일 - 알림 보낸 이슈 목록\n`;
+              }
+              
+              if (issues.length > 0) {
+                let newSection = `\n## ${now}\n\n`;
+                for (const issue of issues) {
+                  newSection += `- <!-- id:${issue.id} --> [${issue.repo}#${issue.number}](${issue.url}) - ${issue.title}\n`;
+                }
+                
+                // 헤더 뒤에 새 섹션 삽입
+                const headerEnd = content.indexOf('\n## ');
+                if (headerEnd > -1) {
+                  content = content.slice(0, headerEnd) + newSection + content.slice(headerEnd);
+                } else {
+                  content += newSection;
+                }
+              }
+              
+              // 용량 제한
+              const idCount = (content.match(/<!-- id:/g) || []).length;
+              if (idCount > CONFIG.maxStoredIssues) {
+                const sections = content.split('\n## ');
+                content = sections.slice(0, -1).join('\n## ');
+              }
+              
+              fs.writeFileSync(CONFIG.dbFile, content);
+            }
+            
+            // ═══════════════════════════════════════════════════════
+            // 🔍 검색 (언어당 1회만!)
             // ═══════════════════════════════════════════════════════
             
             const createdAfter = new Date();
             createdAfter.setDate(createdAfter.getDate() - CONFIG.createdWithinDays);
             const dateStr = createdAfter.toISOString().split('T')[0];
             
-            async function searchIssues(language, label, category) {
-              const query = `is:issue is:open label:"${label}" language:${language} stars:>=${CONFIG.minStars} created:>=${dateStr}`;
+            async function searchLanguage(language) {
+              // 핵심: 한 쿼리에 여러 조건 포함
+              const query = [
+                'is:issue',
+                'is:open',
+                `language:${language}`,
+                `stars:>=${CONFIG.minStars}`,
+                `created:>=${dateStr}`,
+                'label:"good first issue","help wanted","beginner","easy"'
+              ].join(' ');
               
               try {
+                console.log(`🔍 [${language}] Searching...`);
+                
                 const response = await github.rest.search.issuesAndPullRequests({
                   q: query,
                   sort: 'created',
                   order: 'desc',
-                  per_page: CONFIG.maxPerSearch
+                  per_page: CONFIG.maxResults
                 });
                 
-                if (response.data.total_count > 0) {
-                  console.log(`✓ [${language}] "${label}": ${response.data.total_count} issues`);
-                }
+                console.log(`   Found: ${response.data.total_count} issues`);
                 
                 return response.data.items.map(issue => {
                   const repoMatch = issue.repository_url.match(/repos\/(.+)$/);
-                  const repo = repoMatch ? repoMatch[1] : 'unknown';
-                  
                   return {
-                    id: issue.id,
+                    id: String(issue.id),
                     number: issue.number,
-                    title: issue.title.length > 70 ? issue.title.slice(0, 67) + '...' : issue.title,
+                    title: issue.title.slice(0, 55),
                     url: issue.html_url,
-                    repo: repo,
-                    language: language,
-                    category: category,
-                    labels: issue.labels.map(l => l.name),
-                    comments: issue.comments,
-                    created: issue.created_at,
+                    repo: repoMatch ? repoMatch[1] : 'unknown',
+                    language,
                   };
                 });
+                
               } catch (e) {
-                if (e.status !== 422) {  // 검색 결과 없음은 무시
-                  console.log(`Error: ${language}/${label}: ${e.message}`);
-                }
+                console.log(`   Error: ${e.message}`);
                 return [];
               }
             }
             
-            // 검색 실행
-            console.log('🔍 Searching for contribution-friendly issues...');
-            console.log(`Languages: ${CONFIG.languages.join(', ')}`);
-            console.log(`Min stars: ${CONFIG.minStars}, Created after: ${dateStr}\n`);
+            // ═══════════════════════════════════════════════════════
+            // 🚀 실행
+            // ═══════════════════════════════════════════════════════
+            
+            console.log('📂 Loading DB...');
+            const notifiedIds = loadNotifiedIssues();
+            console.log(`   Already notified: ${notifiedIds.size}\n`);
             
             const allIssues = [];
             
             for (const lang of CONFIG.languages) {
-              console.log(`\n📚 Searching ${lang.toUpperCase()}...`);
+              const issues = await searchLanguage(lang);
+              allIssues.push(...issues);
               
-              for (const [category, labels] of Object.entries(LABEL_CATEGORIES)) {
-                for (const label of labels) {
-                  const issues = await searchIssues(lang, label, category);
-                  allIssues.push(...issues);
-                  
-                  // Rate limit: 30 req/min for search API
-                  await new Promise(r => setTimeout(r, 2200));
-                }
-              }
+              // 언어 간 10초 대기 (안전하게)
+              console.log('   Waiting 10s...\n');
+              await new Promise(r => setTimeout(r, 10000));
             }
             
-            // 중복 제거
-            const uniqueIssues = [...new Map(allIssues.map(i => [i.id, i])).values()];
-            console.log(`\n📊 Total unique issues: ${uniqueIssues.length}`);
+            // 중복 제거 & 새 이슈만
+            const unique = [...new Map(allIssues.map(i => [i.id, i])).values()];
+            const newIssues = unique.filter(i => !notifiedIds.has(i.id));
             
-            if (uniqueIssues.length === 0) {
-              console.log('No issues found');
+            console.log(`📊 Total: ${unique.length}, New: ${newIssues.length}`);
+            
+            if (newIssues.length === 0) {
+              console.log('✅ No new issues');
               return;
             }
             
-            // 카테고리별 이모지
-            const categoryEmoji = {
-              beginner: '🟢',
-              helpWanted: '🟡', 
-              docs: '🔵',
-              bugs: '🟠',
-              features: '🟣',
-              cleanup: '⚪',
-            };
-            
-            const categoryNames = {
-              beginner: '입문자용',
-              helpWanted: '도움 요청',
-              docs: '문서/테스트',
-              bugs: '버그 수정',
-              features: '기능 추가',
-              cleanup: '리팩토링',
-            };
-            
-            // 언어 + 카테고리별 그룹화
-            const grouped = {};
-            for (const issue of uniqueIssues) {
-              const key = issue.language;
-              if (!grouped[key]) grouped[key] = {};
-              if (!grouped[key][issue.category]) grouped[key][issue.category] = [];
-              grouped[key][issue.category].push(issue);
+            // Discord Embeds
+            const byLang = {};
+            for (const i of newIssues) {
+              if (!byLang[i.language]) byLang[i.language] = [];
+              byLang[i.language].push(i);
             }
             
-            // Discord Embeds 생성
-            const languageColors = {
-              rust: 0xDEA584,
-              go: 0x00ADD8,
-              typescript: 0x3178C6,
-              python: 0x3776AB,
-              javascript: 0xF7DF1E,
-              solidity: 0x363636,
-            };
-            
+            const colors = { rust: 0xDEA584, go: 0x00ADD8, typescript: 0x3178C6 };
             const embeds = [];
             
-            for (const [lang, categories] of Object.entries(grouped)) {
-              const fields = [];
-              
-              for (const [cat, issues] of Object.entries(categories)) {
-                // 레포별로 그룹화해서 표시
-                const byRepo = {};
-                for (const issue of issues) {
-                  if (!byRepo[issue.repo]) byRepo[issue.repo] = [];
-                  byRepo[issue.repo].push(issue);
-                }
-                
-                // 상위 3개 레포만
-                const topRepos = Object.entries(byRepo)
-                  .sort((a, b) => b[1].length - a[1].length)
-                  .slice(0, 3);
-                
-                const repoList = topRepos.map(([repo, repoIssues]) => {
-                  const issueLinks = repoIssues.slice(0, 2)
-                    .map(i => `[#${i.number}](${i.url})`)
-                    .join(' ');
-                  return `**${repo.split('/')[1]}** ${issueLinks}`;
-                }).join('\n');
-                
-                if (repoList) {
-                  fields.push({
-                    name: `${categoryEmoji[cat]} ${categoryNames[cat]} (${issues.length})`,
-                    value: repoList,
-                    inline: true
-                  });
-                }
+            for (const [lang, issues] of Object.entries(byLang)) {
+              const byRepo = {};
+              for (const i of issues) {
+                if (!byRepo[i.repo]) byRepo[i.repo] = [];
+                byRepo[i.repo].push(i);
               }
               
-              if (fields.length > 0) {
-                const totalForLang = Object.values(categories).flat().length;
-                embeds.push({
-                  title: `${lang.toUpperCase()} — ${totalForLang} issues`,
-                  color: languageColors[lang] || 0x6e7681,
-                  fields: fields.slice(0, 6),
-                });
-              }
+              const fields = Object.entries(byRepo).slice(0, 4).map(([repo, list]) => ({
+                name: `📦 ${repo.split('/')[1]}`,
+                value: list.slice(0, 2).map(i => `[#${i.number}](${i.url}) ${i.title}`).join('\n'),
+                inline: false
+              }));
+              
+              embeds.push({
+                title: `${lang.toUpperCase()} — ${issues.length} new`,
+                color: colors[lang] || 0x6e7681,
+                fields
+              });
             }
             
             // Discord 전송
             if (!DISCORD_WEBHOOK) {
-              console.log('❌ DISCORD_WEBHOOK not set!');
+              console.log('❌ DISCORD_WEBHOOK not set');
               return;
             }
             
-            // 통계 요약
-            const stats = CONFIG.languages.map(l => {
-              const count = grouped[l] ? Object.values(grouped[l]).flat().length : 0;
-              return `${l}: ${count}`;
-            }).join(' | ');
-            
             const payload = JSON.stringify({
-              username: '🔧 Contribution Finder',
-              avatar_url: 'https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png',
-              content: [
-                `## 🎯 기여 가능한 이슈 ${uniqueIssues.length}개 발견!`,
-                `> ⭐ ${CONFIG.minStars}+ stars | 최근 ${CONFIG.createdWithinDays}일`,
-                `> ${stats}`,
-                ``,
-                `🟢 입문 🟡 도움요청 🔵 문서 🟠 버그 🟣 기능 ⚪ 리팩토링`
-              ].join('\n'),
+              username: '🆕 Issue Finder',
+              content: `## 🎯 새 이슈 ${newIssues.length}개!\n> ${CONFIG.languages.join(', ')} | ⭐${CONFIG.minStars}+`,
               embeds: embeds.slice(0, 10)
             });
             
-            const webhookUrl = new URL(DISCORD_WEBHOOK);
-            
             await new Promise((resolve, reject) => {
+              const url = new URL(DISCORD_WEBHOOK);
               const req = https.request({
-                hostname: webhookUrl.hostname,
-                path: webhookUrl.pathname,
+                hostname: url.hostname,
+                path: url.pathname,
                 method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'Content-Length': Buffer.byteLength(payload)
-                }
-              }, (res) => {
-                if (res.statusCode === 204 || res.statusCode === 200) {
-                  console.log('\n✅ Discord notification sent!');
-                } else {
-                  console.log(`Discord: ${res.statusCode}`);
-                }
+                headers: { 'Content-Type': 'application/json' }
+              }, res => {
+                console.log(res.statusCode === 204 ? '✅ Discord sent!' : `Discord: ${res.statusCode}`);
                 resolve();
               });
-              
               req.on('error', reject);
               req.write(payload);
               req.end();
             });
+            
+            // DB 저장
+            saveNotifiedIssues(newIssues);
+            console.log('💾 DB saved');
+            
+      - name: Commit DB
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add notified-issues.md 2>/dev/null || true
+          git diff --staged --quiet || git commit -m "Update notified issues [skip ci]"
+          git push || true
