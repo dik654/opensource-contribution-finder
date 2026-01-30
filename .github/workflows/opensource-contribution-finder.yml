@@ -1,9 +1,5 @@
 # 🌍 기여 가능한 이슈 Discord Notifier
 # 
-# - Rate limit 최대 최적화 (언어당 1회 검색)
-# - MD 파일로 중복 방지
-# - 새 이슈만 알림
-#
 # .github/workflows/contribution-issues.yml
 
 name: Contribution-Friendly Issues
@@ -39,12 +35,11 @@ jobs:
             // ═══════════════════════════════════════════════════════
             
             const CONFIG = {
-              // 검색할 언어 (원하는 대로 수정)
               languages: ['rust', 'go', 'typescript'],
-              
-              minStars: 100,
-              createdWithinDays: 7,
-              maxResults: 50,
+              labels: ['good first issue', 'help wanted'],
+              minStars: 50,
+              createdWithinDays: 14,
+              maxResults: 30,
               dbFile: 'notified-issues.md',
               maxStoredIssues: 500,
             };
@@ -71,7 +66,7 @@ jobs:
               if (fs.existsSync(CONFIG.dbFile)) {
                 content = fs.readFileSync(CONFIG.dbFile, 'utf8');
               } else {
-                content = `# Notified Issues\n\n> 자동 생성 파일 - 알림 보낸 이슈 목록\n`;
+                content = `# Notified Issues\n\n> 자동 생성 파일\n`;
               }
               
               if (issues.length > 0) {
@@ -80,7 +75,6 @@ jobs:
                   newSection += `- <!-- id:${issue.id} --> [${issue.repo}#${issue.number}](${issue.url}) - ${issue.title}\n`;
                 }
                 
-                // 헤더 뒤에 새 섹션 삽입
                 const headerEnd = content.indexOf('\n## ');
                 if (headerEnd > -1) {
                   content = content.slice(0, headerEnd) + newSection + content.slice(headerEnd);
@@ -89,7 +83,6 @@ jobs:
                 }
               }
               
-              // 용량 제한
               const idCount = (content.match(/<!-- id:/g) || []).length;
               if (idCount > CONFIG.maxStoredIssues) {
                 const sections = content.split('\n## ');
@@ -100,27 +93,19 @@ jobs:
             }
             
             // ═══════════════════════════════════════════════════════
-            // 🔍 검색 (언어당 1회만!)
+            // 🔍 검색
             // ═══════════════════════════════════════════════════════
             
             const createdAfter = new Date();
             createdAfter.setDate(createdAfter.getDate() - CONFIG.createdWithinDays);
             const dateStr = createdAfter.toISOString().split('T')[0];
             
-            async function searchLanguage(language) {
-              // 핵심: 한 쿼리에 여러 조건 포함
-              const query = [
-                'is:issue',
-                'is:open',
-                `language:${language}`,
-                `stars:>=${CONFIG.minStars}`,
-                `created:>=${dateStr}`,
-                'label:"good first issue","help wanted","beginner","easy"'
-              ].join(' ');
+            async function search(language, label) {
+              const query = `is:issue is:open language:${language} label:"${label}" stars:>=${CONFIG.minStars} created:>=${dateStr}`;
+              
+              console.log(`🔍 [${language}] "${label}"`);
               
               try {
-                console.log(`🔍 [${language}] Searching...`);
-                
                 const response = await github.rest.search.issuesAndPullRequests({
                   q: query,
                   sort: 'created',
@@ -128,7 +113,7 @@ jobs:
                   per_page: CONFIG.maxResults
                 });
                 
-                console.log(`   Found: ${response.data.total_count} issues`);
+                console.log(`   → ${response.data.total_count} found`);
                 
                 return response.data.items.map(issue => {
                   const repoMatch = issue.repository_url.match(/repos\/(.+)$/);
@@ -143,7 +128,7 @@ jobs:
                 });
                 
               } catch (e) {
-                console.log(`   Error: ${e.message}`);
+                console.log(`   ❌ ${e.message}`);
                 return [];
               }
             }
@@ -158,20 +143,22 @@ jobs:
             
             const allIssues = [];
             
+            // 언어별 + 라벨별 검색
             for (const lang of CONFIG.languages) {
-              const issues = await searchLanguage(lang);
-              allIssues.push(...issues);
-              
-              // 언어 간 10초 대기 (안전하게)
-              console.log('   Waiting 10s...\n');
-              await new Promise(r => setTimeout(r, 10000));
+              for (const label of CONFIG.labels) {
+                const issues = await search(lang, label);
+                allIssues.push(...issues);
+                
+                // 검색 간 6초 대기
+                await new Promise(r => setTimeout(r, 6000));
+              }
             }
             
             // 중복 제거 & 새 이슈만
             const unique = [...new Map(allIssues.map(i => [i.id, i])).values()];
             const newIssues = unique.filter(i => !notifiedIds.has(i.id));
             
-            console.log(`📊 Total: ${unique.length}, New: ${newIssues.length}`);
+            console.log(`\n📊 Total: ${unique.length}, New: ${newIssues.length}`);
             
             if (newIssues.length === 0) {
               console.log('✅ No new issues');
