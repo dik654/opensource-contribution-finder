@@ -35,12 +35,30 @@ jobs:
             // ═══════════════════════════════════════════════════════
             
             const CONFIG = {
-              languages: ['rust', 'go', 'typescript'],
-              labels: ['good first issue', 'help wanted'],
-              minStars: 50,
-              maxResults: 100,  // 30 → 100 (최대치)
+              // 검색 쿼리들 (직접 지정)
+              searches: [
+                // Rust 프로젝트
+                { label: 'good first issue', extra: 'repo:rust-lang/rust', name: 'rust-lang/rust' },
+                { label: 'good first issue', extra: 'repo:paradigmxyz/reth', name: 'paradigmxyz/reth' },
+                { label: 'good first issue', extra: 'repo:foundry-rs/foundry', name: 'foundry' },
+                { label: 'E-easy', extra: 'repo:rust-lang/rust', name: 'rust-lang/rust (E-easy)' },
+                
+                // Go 프로젝트  
+                { label: 'good first issue', extra: 'repo:ethereum/go-ethereum', name: 'go-ethereum' },
+                { label: 'help wanted', extra: 'repo:ethereum/go-ethereum', name: 'go-ethereum' },
+                
+                // TypeScript 프로젝트
+                { label: 'good first issue', extra: 'repo:ChainSafe/lodestar', name: 'lodestar' },
+                { label: 'help wanted', extra: 'repo:ChainSafe/lodestar', name: 'lodestar' },
+                
+                // 큰 프로젝트들 (라벨 기반)
+                { label: 'good first issue', extra: 'stars:>1000', name: 'popular (1000+)' },
+                { label: 'help wanted', extra: 'stars:>1000', name: 'popular (1000+)' },
+              ],
+              
+              maxResults: 100,
               dbFile: 'notified-issues.md',
-              maxStoredIssues: 500,
+              maxStoredIssues: 1000,
             };
             
             // ═══════════════════════════════════════════════════════
@@ -95,10 +113,11 @@ jobs:
             // 🔍 검색
             // ═══════════════════════════════════════════════════════
             
-            async function search(language, label) {
-              const query = `is:issue is:open language:${language} label:"${label}" stars:>=${CONFIG.minStars}`;
+            async function search(searchConfig) {
+              const query = `is:issue is:open label:"${searchConfig.label}" ${searchConfig.extra}`;
               
-              console.log(`🔍 [${language}] "${label}"`);
+              console.log(`🔍 [${searchConfig.name}] "${searchConfig.label}"`);
+              console.log(`   Query: ${query}`);
               
               try {
                 const response = await github.rest.search.issuesAndPullRequests({
@@ -118,7 +137,6 @@ jobs:
                     title: issue.title.slice(0, 55),
                     url: issue.html_url,
                     repo: repoMatch ? repoMatch[1] : 'unknown',
-                    language,
                   };
                 });
                 
@@ -138,54 +156,42 @@ jobs:
             
             const allIssues = [];
             
-            for (const lang of CONFIG.languages) {
-              for (const label of CONFIG.labels) {
-                const issues = await search(lang, label);
-                allIssues.push(...issues);
-                
-                // 6초 대기
-                await new Promise(r => setTimeout(r, 6000));
-              }
+            for (const searchConfig of CONFIG.searches) {
+              const issues = await search(searchConfig);
+              allIssues.push(...issues);
+              
+              // 4초 대기
+              await new Promise(r => setTimeout(r, 4000));
             }
             
             // 중복 제거 & 새 이슈만
             const unique = [...new Map(allIssues.map(i => [i.id, i])).values()];
             const newIssues = unique.filter(i => !notifiedIds.has(i.id));
             
-            console.log(`\n📊 Total: ${unique.length}, New: ${newIssues.length}`);
+            console.log(`\n📊 Total unique: ${unique.length}, New: ${newIssues.length}`);
             
             if (newIssues.length === 0) {
               console.log('✅ No new issues');
               return;
             }
             
-            // Discord Embeds
-            const byLang = {};
+            // Discord Embeds - 레포별 그룹화
+            const byRepo = {};
             for (const i of newIssues) {
-              if (!byLang[i.language]) byLang[i.language] = [];
-              byLang[i.language].push(i);
+              if (!byRepo[i.repo]) byRepo[i.repo] = [];
+              byRepo[i.repo].push(i);
             }
             
-            const colors = { rust: 0xDEA584, go: 0x00ADD8, typescript: 0x3178C6 };
             const embeds = [];
             
-            for (const [lang, issues] of Object.entries(byLang)) {
-              const byRepo = {};
-              for (const i of issues) {
-                if (!byRepo[i.repo]) byRepo[i.repo] = [];
-                byRepo[i.repo].push(i);
-              }
-              
-              const fields = Object.entries(byRepo).slice(0, 4).map(([repo, list]) => ({
-                name: `📦 ${repo.split('/')[1]}`,
-                value: list.slice(0, 2).map(i => `[#${i.number}](${i.url}) ${i.title}`).join('\n'),
-                inline: false
-              }));
-              
+            for (const [repo, issues] of Object.entries(byRepo).slice(0, 10)) {
               embeds.push({
-                title: `${lang.toUpperCase()} — ${issues.length} new`,
-                color: colors[lang] || 0x6e7681,
-                fields
+                title: `📦 ${repo}`,
+                color: 0x238636,
+                description: issues.slice(0, 5).map(i => 
+                  `[#${i.number}](${i.url}) ${i.title}`
+                ).join('\n'),
+                footer: { text: `${issues.length} issue(s)` }
               });
             }
             
@@ -197,7 +203,7 @@ jobs:
             
             const payload = JSON.stringify({
               username: '🆕 Issue Finder',
-              content: `## 🎯 새 이슈 ${newIssues.length}개!\n> ${CONFIG.languages.join(', ')} | ⭐${CONFIG.minStars}+`,
+              content: `## 🎯 새 이슈 ${newIssues.length}개 발견!`,
               embeds: embeds.slice(0, 10)
             });
             
