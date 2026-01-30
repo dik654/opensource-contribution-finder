@@ -38,7 +38,6 @@ jobs:
               languages: ['rust', 'go', 'typescript'],
               labels: ['good first issue', 'help wanted'],
               minStars: 50,
-              createdWithinDays: 14,
               maxResults: 30,
               dbFile: 'notified-issues.md',
               maxStoredIssues: 500,
@@ -96,19 +95,17 @@ jobs:
             // 🔍 검색
             // ═══════════════════════════════════════════════════════
             
-            const createdAfter = new Date();
-            createdAfter.setDate(createdAfter.getDate() - CONFIG.createdWithinDays);
-            const dateStr = createdAfter.toISOString().split('T')[0];
-            
             async function search(language, label) {
-              const query = `is:issue is:open language:${language} label:"${label}" stars:>=${CONFIG.minStars} created:>=${dateStr}`;
+              // created 조건 제거, 단순하게
+              const query = `is:issue is:open language:${language} label:"${label}" stars:>=${CONFIG.minStars}`;
               
               console.log(`🔍 [${language}] "${label}"`);
+              console.log(`   Query: ${query}`);
               
               try {
                 const response = await github.rest.search.issuesAndPullRequests({
                   q: query,
-                  sort: 'created',
+                  sort: 'updated',
                   order: 'desc',
                   per_page: CONFIG.maxResults
                 });
@@ -143,13 +140,12 @@ jobs:
             
             const allIssues = [];
             
-            // 언어별 + 라벨별 검색
             for (const lang of CONFIG.languages) {
               for (const label of CONFIG.labels) {
                 const issues = await search(lang, label);
                 allIssues.push(...issues);
                 
-                // 검색 간 6초 대기
+                // 6초 대기
                 await new Promise(r => setTimeout(r, 6000));
               }
             }
