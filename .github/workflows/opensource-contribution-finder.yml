@@ -1,0 +1,758 @@
+# Contribution Issue Finder v7.1
+#
+# v7 + created:>=90d filter + 30s search delay
+#
+# 25 repos → 5 batched queries (all under 256 chars)
+# Labels merged with OR → no duplicate queries
+# 30s delay between searches → secondary rate limit safe
+# created:>=90d → no ancient issues
+#
+# Search queries: 5 (fixed) + 5 (discovery repos) + ~3 (discovery issues) = ~13
+# PR/claim checks: REST API (separate 5000/hr quota)
+# Gemini: Flash-Lite free tier (15 RPM, 1000 RPD) — issue body → 한글 요약
+# Total runtime: ~8 min
+#
+# Secrets needed:
+#   DISCORD_WEBHOOK   — Discord webhook URL
+#   GEMINI_API_KEY    — Google AI Studio API key (free)
+#
+# .github/workflows/contribution-issues.yml
+
+name: Contribution-Friendly Issues
+
+on:
+  schedule:
+    - cron: '45 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Search and notify
+        uses: actions/github-script@v7
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        with:
+          script: |
+            var https = require('https');
+            var fs = require('fs');
+            var DISCORD_WEBHOOK = process.env.DISCORD_WEBHOOK;
+            var GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+
+            // ═══════════════════════════════════════════════════════
+            // Batched repo groups (each query < 256 chars)
+            // ═══════════════════════════════════════════════════════
+
+            var BATCHES = [
+              {
+                tag: 'ethereum-1',
+                repos: [
+                  'paradigmxyz/reth',
+                  'lambdaclass/ethrex',
+                  'sigp/lighthouse',
+                  'ChainSafe/lodestar',
+                  'foundry-rs/foundry',
+                ],
+              },
+              {
+                tag: 'ethereum-2',
+                repos: [
+                  'alloy-rs/alloy',
+                  'bluealloy/revm',
+                  'ethereum-optimism/optimism',
+                  'OffchainLabs/nitro',
+                  'commonwarexyz/monorepo',
+                ],
+              },
+              {
+                tag: 'rust-infra-1',
+                repos: [
+                  'pola-rs/polars',
+                  'astral-sh/ruff',
+                  'databendlabs/databend',
+                  'RustPython/RustPython',
+                ],
+              },
+              {
+                tag: 'rust-infra-2',
+                repos: [
+                  'facebook/pyrefly',
+                  'rust-lang/rust-clippy',
+                  'nushell/nushell',
+                  'tikv/tikv',
+                  'lancedb/lance',
+                ],
+              },
+              {
+                tag: 'ai-ml',
+                repos: [
+                  'vllm-project/llm-compressor',
+                  'vllm-project/vllm',
+                  'deepset-ai/haystack',
+                  'huggingface/transformers',
+                  'huggingface/tokenizers',
+                ],
+              },
+            ];
+
+            // Category mapping for Discord display
+            var REPO_CATEGORY = {};
+            [
+              'paradigmxyz/reth', 'lambdaclass/ethrex', 'sigp/lighthouse',
+              'ChainSafe/lodestar', 'foundry-rs/foundry', 'alloy-rs/alloy',
+              'bluealloy/revm', 'ethereum-optimism/optimism', 'OffchainLabs/nitro',
+            ].forEach(function(r) { REPO_CATEGORY[r] = 'ethereum'; });
+            REPO_CATEGORY['commonwarexyz/monorepo'] = 'commonware';
+            [
+              'pola-rs/polars', 'astral-sh/ruff', 'databendlabs/databend',
+              'RustPython/RustPython', 'facebook/pyrefly', 'rust-lang/rust-clippy',
+              'nushell/nushell', 'tikv/tikv',
+            ].forEach(function(r) { REPO_CATEGORY[r] = 'rust-infra'; });
+            [
+              'vllm-project/llm-compressor', 'vllm-project/vllm', 'deepset-ai/haystack',
+              'lancedb/lance', 'huggingface/transformers', 'huggingface/tokenizers',
+            ].forEach(function(r) { REPO_CATEGORY[r] = 'ai-ml'; });
+
+            // Discovery queries
+            var DISCOVERY_QUERIES = [
+              { q: 'topic:ethereum language:rust stars:>100',   tag: 'rust-eth' },
+              { q: 'topic:blockchain language:rust stars:>100', tag: 'rust-chain' },
+              { q: 'topic:cosmos language:go stars:>100',       tag: 'go-cosmos' },
+              { q: 'topic:llm language:python stars:>200',      tag: 'py-llm' },
+              { q: 'topic:ai language:rust stars:>100',         tag: 'rust-ai' },
+            ];
+
+            var DISCOVERY_MAX_REPOS = 12;
+
+            var CONFIG = {
+              dbFile: 'notified-issues.md',
+              maxStoredIssues: 1000,
+              searchDelayMs: 30000,
+              restDelayMs: 300,
+              maxPrChecks: 100,
+              geminiDelayMs: 1500,     // 1.5s between Gemini calls (safe for 15 RPM)
+              geminiMaxSummaries: 80,  // max issues to summarize per run
+            };
+
+            // ═══════════════════════════════════════════════════════
+            // DB
+            // ═══════════════════════════════════════════════════════
+
+            function loadNotifiedIssues() {
+              try {
+                if (fs.existsSync(CONFIG.dbFile)) {
+                  var content = fs.readFileSync(CONFIG.dbFile, 'utf8');
+                  var ids = content.match(/<!-- id:(\d+) -->/g) || [];
+                  return new Set(ids.map(function(s) { return s.match(/\d+/)[0]; }));
+                }
+              } catch (e) {}
+              return new Set();
+            }
+
+            function saveNotifiedIssues(issues) {
+              var now = new Date().toISOString().split('T')[0];
+              var content = '';
+              if (fs.existsSync(CONFIG.dbFile)) {
+                content = fs.readFileSync(CONFIG.dbFile, 'utf8');
+              } else {
+                content = '# Notified Issues\n\n> Auto-generated\n';
+              }
+
+              if (issues.length > 0) {
+                var section = '\n## ' + now + '\n\n';
+                for (var i = 0; i < issues.length; i++) {
+                  var x = issues[i];
+                  section += '- <!-- id:' + x.id + ' --> [' + x.repo + '#' + x.number + '](' + x.url + ') - ' + x.title + '\n';
+                }
+                var pos = content.indexOf('\n## ');
+                content = pos > -1
+                  ? content.slice(0, pos) + section + content.slice(pos)
+                  : content + section;
+              }
+
+              if ((content.match(/<!-- id:/g) || []).length > CONFIG.maxStoredIssues) {
+                var parts = content.split('\n## ');
+                content = parts.slice(0, -1).join('\n## ');
+              }
+              fs.writeFileSync(CONFIG.dbFile, content);
+            }
+
+            // ═══════════════════════════════════════════════════════
+            // Rate-limited Search
+            // ═══════════════════════════════════════════════════════
+
+            var searchCount = 0;
+            var searchWindowStart = Date.now();
+
+            async function searchGuard() {
+              searchCount++;
+              if (searchCount >= 25) {
+                var elapsed = Date.now() - searchWindowStart;
+                if (elapsed < 60000) {
+                  var wait = 62000 - elapsed;
+                  console.log('   [pause] window reset ' + Math.ceil(wait / 1000) + 's');
+                  await new Promise(function(r) { setTimeout(r, wait); });
+                }
+                searchCount = 0;
+                searchWindowStart = Date.now();
+              }
+            }
+
+            async function searchWithRetry(apiFn, params, label) {
+              await searchGuard();
+
+              for (var attempt = 0; attempt < 3; attempt++) {
+                try {
+                  var resp = await apiFn(params);
+                  var h = resp.headers || {};
+                  var remaining = h['x-ratelimit-remaining'] || '?';
+                  var limit = h['x-ratelimit-limit'] || '?';
+                  console.log('   [rate] ' + remaining + '/' + limit);
+                  return resp.data;
+                } catch (e) {
+                  var status = e.status || 'unknown';
+                  var retryAfter = e.response && e.response.headers && e.response.headers['retry-after'];
+                  var rlRemaining = e.response && e.response.headers && e.response.headers['x-ratelimit-remaining'];
+                  var isSecondary = rlRemaining !== '0';
+
+                  if (status === 403 || status === 429) {
+                    var wait;
+                    if (retryAfter) {
+                      wait = parseInt(retryAfter) * 1000;
+                    } else if (isSecondary) {
+                      wait = (attempt + 1) * 60000;
+                    } else {
+                      var reset = e.response && e.response.headers && e.response.headers['x-ratelimit-reset'];
+                      wait = reset ? (parseInt(reset) * 1000 - Date.now() + 2000) : 65000;
+                    }
+                    wait = Math.max(wait, 5000);
+                    var type = isSecondary ? 'secondary' : 'primary';
+                    console.log('   [' + type + '] attempt ' + (attempt + 1) + '/3, wait ' + Math.ceil(wait / 1000) + 's');
+                    await new Promise(function(r) { setTimeout(r, wait); });
+                    searchCount = 0;
+                    searchWindowStart = Date.now();
+                  } else {
+                    console.log('   [error] ' + status + ': ' + (e.message || ''));
+                    return null;
+                  }
+                }
+              }
+              console.log('   [failed] ' + label);
+              return null;
+            }
+
+            async function searchIssues(query) {
+              var data = await searchWithRetry(
+                function(p) { return github.rest.search.issuesAndPullRequests(p); },
+                { q: query, sort: 'updated', order: 'desc', per_page: 100 },
+                query.slice(0, 100)
+              );
+              return data ? data.items : [];
+            }
+
+            async function searchRepos(query) {
+              var data = await searchWithRetry(
+                function(p) { return github.rest.search.repos(p); },
+                { q: query, sort: 'stars', order: 'desc', per_page: 20 },
+                query.slice(0, 100)
+              );
+              return data ? data.items : [];
+            }
+
+            // ═══════════════════════════════════════════════════════
+            // PR link & claim check (REST API, 5000/hr)
+            // ═══════════════════════════════════════════════════════
+
+            var prCheckCount = 0;
+
+            async function hasLinkedPROrClaim(owner, repo, issueNumber) {
+              if (prCheckCount >= CONFIG.maxPrChecks) return false;
+              prCheckCount++;
+
+              try {
+                await new Promise(function(r) { setTimeout(r, CONFIG.restDelayMs); });
+                var timeline = await github.rest.issues.listEventsForTimeline({
+                  owner: owner, repo: repo,
+                  issue_number: issueNumber,
+                  per_page: 50,
+                });
+
+                var hasOpenPR = timeline.data.some(function(ev) {
+                  return ev.event === 'cross-referenced' &&
+                    ev.source && ev.source.issue && ev.source.issue.pull_request &&
+                    ev.source.issue.state === 'open';
+                });
+                if (hasOpenPR) return true;
+
+                await new Promise(function(r) { setTimeout(r, CONFIG.restDelayMs); });
+                var comments = await github.rest.issues.listComments({
+                  owner: owner, repo: repo,
+                  issue_number: issueNumber,
+                  per_page: 5,
+                });
+
+                var cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
+                var claimPatterns = [
+                  /\bi.?(?:ll|will|am going to|'m going to)\s+(?:work|take|tackle|fix|handle|implement)/i,
+                  /\b(?:working on|taking|claimed|i.?m on)\s+(?:this|it)/i,
+                  /\bcan i (?:work on|take|be assigned)/i,
+                  /\bplease assign (?:this to )?me/i,
+                  /\bi.?d like to (?:work on|take|tackle)/i,
+                ];
+
+                return comments.data.some(function(c) {
+                  if (new Date(c.created_at).getTime() < cutoff) return false;
+                  var body = c.body || '';
+                  return claimPatterns.some(function(p) { return p.test(body); });
+                });
+              } catch (e) {
+                return false;
+              }
+            }
+
+            // ═══════════════════════════════════════════════════════
+            // Gemini AI 이슈 요약 (한글)
+            //
+            //   모델: gemini-2.5-flash-lite (free: 15 RPM, 1000 RPD)
+            //   전략: 이슈 5개를 한 프롬프트에 묶어서 배치 요약
+            //         → API 호출 수 = ceil(N/5)
+            //         → 80개 이슈 = 16 API 호출
+            // ═══════════════════════════════════════════════════════
+
+            async function fetchIssueBody(owner, repo, issueNumber) {
+              try {
+                await new Promise(function(r) { setTimeout(r, CONFIG.restDelayMs); });
+                var resp = await github.rest.issues.get({
+                  owner: owner, repo: repo,
+                  issue_number: issueNumber,
+                });
+                var body = resp.data.body || '';
+                // 토큰 절약: body 앞부분만 (2000자)
+                return body.slice(0, 2000);
+              } catch (e) {
+                return '';
+              }
+            }
+
+            function geminiRequest(prompt) {
+              return new Promise(function(resolve) {
+                var postData = JSON.stringify({
+                  contents: [{
+                    parts: [{ text: prompt }]
+                  }],
+                  generationConfig: {
+                    temperature: 0.2,
+                    maxOutputTokens: 2048,
+                  }
+                });
+
+                var req = https.request({
+                  hostname: 'generativelanguage.googleapis.com',
+                  path: '/v1beta/models/gemini-2.5-flash-lite:generateContent?key=' + GEMINI_API_KEY,
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'Content-Length': Buffer.byteLength(postData),
+                  },
+                }, function(res) {
+                  var chunks = [];
+                  res.on('data', function(c) { chunks.push(c); });
+                  res.on('end', function() {
+                    try {
+                      var data = JSON.parse(Buffer.concat(chunks).toString());
+                      if (data.candidates && data.candidates[0] &&
+                          data.candidates[0].content && data.candidates[0].content.parts) {
+                        resolve(data.candidates[0].content.parts[0].text || '');
+                      } else if (data.error) {
+                        console.log('   [gemini error] ' + data.error.message);
+                        resolve('');
+                      } else {
+                        resolve('');
+                      }
+                    } catch (e) {
+                      resolve('');
+                    }
+                  });
+                });
+                req.on('error', function() { resolve(''); });
+                req.write(postData);
+                req.end();
+              });
+            }
+
+            async function summarizeIssues(issues) {
+              if (!GEMINI_API_KEY) {
+                console.log('GEMINI_API_KEY not set, skipping summaries');
+                return;
+              }
+
+              var toSummarize = issues.slice(0, CONFIG.geminiMaxSummaries);
+              console.log('\nFetching issue bodies (' + toSummarize.length + ')...');
+
+              // Step 1: 이슈 body 가져오기
+              for (var i = 0; i < toSummarize.length; i++) {
+                var issue = toSummarize[i];
+                var parts = issue.repo.split('/');
+                issue.body = await fetchIssueBody(parts[0], parts[1], issue.number);
+                if ((i + 1) % 10 === 0) {
+                  console.log('   fetched ' + (i + 1) + '/' + toSummarize.length);
+                }
+              }
+
+              // Step 2: 5개씩 배치로 Gemini 요약
+              var BATCH_SIZE = 5;
+              var batches = [];
+              for (var i = 0; i < toSummarize.length; i += BATCH_SIZE) {
+                batches.push(toSummarize.slice(i, i + BATCH_SIZE));
+              }
+
+              console.log('Gemini summarizing (' + batches.length + ' batches)...');
+
+              for (var bi = 0; bi < batches.length; bi++) {
+                var batch = batches[bi];
+
+                var prompt = '다음 GitHub 이슈들의 핵심 내용을 한글로 요약해줘.\n';
+                prompt += '각 이슈마다 2~3줄로 무엇을 해야 하는지, 어떤 종류의 작업인지 설명해줘.\n';
+                prompt += '반드시 아래 형식으로만 응답해 (다른 말 하지 마):\n\n';
+                prompt += '[1] 요약내용\n[2] 요약내용\n...\n\n';
+
+                for (var i = 0; i < batch.length; i++) {
+                  var issue = batch[i];
+                  prompt += '---\n';
+                  prompt += '[' + (i + 1) + '] ' + issue.repo + '#' + issue.number + ': ' + issue.title + '\n';
+                  if (issue.body) {
+                    prompt += issue.body.slice(0, 800) + '\n';
+                  }
+                }
+
+                var result = await geminiRequest(prompt);
+
+                // 응답 파싱: [1] ... [2] ... 형식
+                if (result) {
+                  for (var i = 0; i < batch.length; i++) {
+                    var tag = '[' + (i + 1) + ']';
+                    var nextTag = '[' + (i + 2) + ']';
+                    var start = result.indexOf(tag);
+                    if (start === -1) continue;
+
+                    start += tag.length;
+                    var end = result.indexOf(nextTag, start);
+                    if (end === -1) {
+                      // 마지막 항목이거나 다음 태그 없음
+                      var nextDash = result.indexOf('---', start);
+                      end = nextDash > -1 ? nextDash : result.length;
+                    }
+
+                    var summary = result.slice(start, end).trim();
+                    // 너무 긴 요약 자르기 (Discord field 한계 고려)
+                    if (summary.length > 300) summary = summary.slice(0, 297) + '...';
+                    batch[i].summary = summary;
+                  }
+                }
+
+                if (bi < batches.length - 1) {
+                  await new Promise(function(r) { setTimeout(r, CONFIG.geminiDelayMs); });
+                }
+
+                if ((bi + 1) % 5 === 0 || bi === batches.length - 1) {
+                  console.log('   batch ' + (bi + 1) + '/' + batches.length + ' done');
+                }
+              }
+
+              var summarized = toSummarize.filter(function(i) { return i.summary; }).length;
+              console.log('   ' + summarized + '/' + toSummarize.length + ' summarized');
+            }
+
+            // ═══════════════════════════════════════════════════════
+            // Phase 1: Fixed repos — 5 batched queries
+            // ═══════════════════════════════════════════════════════
+
+            var knownRepos = new Set();
+            BATCHES.forEach(function(b) {
+              b.repos.forEach(function(r) { knownRepos.add(r); });
+            });
+
+            var notifiedIds = loadNotifiedIssues();
+            console.log('Known IDs: ' + notifiedIds.size + ', Batches: ' + BATCHES.length + '\n');
+
+            var allIssues = [];
+            var cutoffDate = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+            console.log('Issue cutoff: ' + cutoffDate);
+
+            for (var bi = 0; bi < BATCHES.length; bi++) {
+              var batch = BATCHES[bi];
+              var repoClause = batch.repos.map(function(r) { return 'repo:' + r; }).join(' ');
+              var q = 'is:issue is:open no:assignee created:>=' + cutoffDate + ' ' + repoClause + ' (label:"good first issue" OR label:"help wanted")';
+
+              console.log('[' + batch.tag + '] ' + batch.repos.length + ' repos, ' + q.length + ' chars');
+
+              var items = await searchIssues(q);
+              var filtered = items.filter(function(i) { return !i.pull_request; });
+
+              if (filtered.length > 0) {
+                var repoCounts = {};
+                filtered.forEach(function(i) {
+                  var rname = i.repository_url.replace('https://api.github.com/repos/', '');
+                  repoCounts[rname] = (repoCounts[rname] || 0) + 1;
+                });
+                var summary = Object.entries(repoCounts)
+                  .map(function(e) { return e[0].split('/')[1] + ':' + e[1]; })
+                  .join(' ');
+                console.log('   -> ' + filtered.length + ' issues (' + summary + ')');
+              } else {
+                console.log('   -> 0 issues');
+              }
+
+              for (var fi = 0; fi < filtered.length; fi++) {
+                var item = filtered[fi];
+                var rname = item.repository_url.replace('https://api.github.com/repos/', '');
+                allIssues.push({
+                  id: String(item.id),
+                  number: item.number,
+                  title: item.title.slice(0, 60),
+                  url: item.html_url,
+                  repo: rname,
+                  category: REPO_CATEGORY[rname] || 'other',
+                });
+              }
+
+              await new Promise(function(r) { setTimeout(r, CONFIG.searchDelayMs); });
+            }
+
+            // ═══════════════════════════════════════════════════════
+            // Phase 2: Discovery
+            // ═══════════════════════════════════════════════════════
+
+            console.log('\nDiscovery A: ' + DISCOVERY_QUERIES.length + ' repo queries');
+
+            var discoveredRepos = new Set();
+
+            for (var di = 0; di < DISCOVERY_QUERIES.length; di++) {
+              var dq = DISCOVERY_QUERIES[di];
+              var repos = await searchRepos(dq.q);
+
+              for (var ri = 0; ri < repos.length; ri++) {
+                var r = repos[ri];
+                if (knownRepos.has(r.full_name) || discoveredRepos.has(r.full_name)) continue;
+                if (r.archived || r.fork) continue;
+                discoveredRepos.add(r.full_name);
+                console.log('   new: [' + dq.tag + '] ' + r.full_name + ' *' + r.stargazers_count);
+              }
+
+              await new Promise(function(r) { setTimeout(r, CONFIG.searchDelayMs); });
+            }
+
+            var discRepoList = Array.from(discoveredRepos).slice(0, DISCOVERY_MAX_REPOS);
+            console.log('\nDiscovery B: ' + discRepoList.length + ' repos');
+
+            if (discRepoList.length > 0) {
+              var discBatches = [];
+              var current = [];
+              var currentLen = 56;
+
+              for (var i = 0; i < discRepoList.length; i++) {
+                var repoStr = 'repo:' + discRepoList[i];
+                if (currentLen + repoStr.length + 1 > 256 && current.length > 0) {
+                  discBatches.push(current);
+                  current = [];
+                  currentLen = 56;
+                }
+                current.push(discRepoList[i]);
+                currentLen += repoStr.length + 1;
+              }
+              if (current.length > 0) discBatches.push(current);
+
+              console.log('   ' + discBatches.length + ' discovery batches');
+
+              for (var dbi = 0; dbi < discBatches.length; dbi++) {
+                var dbRepos = discBatches[dbi];
+                var repoClause = dbRepos.map(function(r) { return 'repo:' + r; }).join(' ');
+                var q = 'is:issue is:open no:assignee created:>=' + cutoffDate + ' ' + repoClause + ' label:"good first issue"';
+
+                var items = await searchIssues(q);
+                var filtered = items.filter(function(i) { return !i.pull_request; });
+
+                if (filtered.length > 0) {
+                  console.log('   -> ' + filtered.length + ' discovered issues');
+                }
+
+                for (var fi = 0; fi < filtered.length; fi++) {
+                  var item = filtered[fi];
+                  var rname = item.repository_url.replace('https://api.github.com/repos/', '');
+                  allIssues.push({
+                    id: String(item.id),
+                    number: item.number,
+                    title: item.title.slice(0, 60),
+                    url: item.html_url,
+                    repo: rname,
+                    category: 'discovered',
+                  });
+                }
+
+                await new Promise(function(r) { setTimeout(r, CONFIG.searchDelayMs); });
+              }
+            }
+
+            // ═══════════════════════════════════════════════════════
+            // Dedup → DB filter → PR/Claim filter
+            // ═══════════════════════════════════════════════════════
+
+            var seen = {};
+            var unique = [];
+            for (var i = 0; i < allIssues.length; i++) {
+              if (!seen[allIssues[i].id]) {
+                seen[allIssues[i].id] = true;
+                unique.push(allIssues[i]);
+              }
+            }
+
+            var candidates = unique.filter(function(i) { return !notifiedIds.has(i.id); });
+            console.log('\nTotal: ' + unique.length + ', New: ' + candidates.length);
+
+            if (candidates.length === 0) {
+              console.log('No new issues');
+              return;
+            }
+
+            console.log('Checking PRs & claims...');
+
+            var newIssues = [];
+            for (var i = 0; i < candidates.length; i++) {
+              var issue = candidates[i];
+              var parts = issue.repo.split('/');
+              var taken = await hasLinkedPROrClaim(parts[0], parts[1], issue.number);
+              if (taken) {
+                console.log('   skip: ' + issue.repo + '#' + issue.number);
+              } else {
+                newIssues.push(issue);
+              }
+            }
+
+            console.log('\nAvailable: ' + newIssues.length);
+
+            if (newIssues.length === 0) {
+              console.log('Done — no new available issues');
+              return;
+            }
+
+            // ═══════════════════════════════════════════════════════
+            // Gemini 요약
+            // ═══════════════════════════════════════════════════════
+
+            await summarizeIssues(newIssues);
+
+            // ═══════════════════════════════════════════════════════
+            // Discord
+            // ═══════════════════════════════════════════════════════
+
+            var style = {
+              'ethereum':    { color: 0x627EEA, emoji: '⛓️' },
+              'commonware':  { color: 0x00D4AA, emoji: '⚡' },
+              'rust-infra':  { color: 0xDEA584, emoji: '🦀' },
+              'ai-ml':       { color: 0x7C3AED, emoji: '🤖' },
+              'discovered':  { color: 0x2EA043, emoji: '🔭' },
+            };
+
+            var byCategory = {};
+            for (var i = 0; i < newIssues.length; i++) {
+              var cat = newIssues[i].category;
+              if (!byCategory[cat]) byCategory[cat] = [];
+              byCategory[cat].push(newIssues[i]);
+            }
+
+            var embeds = [];
+            var catEntries = Object.entries(byCategory);
+            for (var ci = 0; ci < catEntries.length; ci++) {
+              var cat = catEntries[ci][0];
+              var issues = catEntries[ci][1];
+              var s = style[cat] || { color: 0x6e7681, emoji: '📁' };
+
+              var byRepo = {};
+              for (var i = 0; i < issues.length; i++) {
+                var repo = issues[i].repo;
+                if (!byRepo[repo]) byRepo[repo] = [];
+                byRepo[repo].push(issues[i]);
+              }
+
+              var repoEntries = Object.entries(byRepo).slice(0, 5);
+              var fields = [];
+              for (var ri = 0; ri < repoEntries.length; ri++) {
+                var repo = repoEntries[ri][0];
+                var list = repoEntries[ri][1].slice(0, 3);
+                var lines = [];
+                for (var li = 0; li < list.length; li++) {
+                  var iss = list[li];
+                  var line = '[#' + iss.number + '](' + iss.url + ') ' + iss.title;
+                  if (iss.summary) {
+                    line += '\n> ' + iss.summary.split('\n').join('\n> ');
+                  }
+                  lines.push(line);
+                }
+                fields.push({ name: repo, value: lines.join('\n\n'), inline: false });
+              }
+
+              embeds.push({
+                title: s.emoji + ' ' + cat + ' — ' + issues.length + ' issues',
+                color: s.color,
+                fields: fields,
+              });
+            }
+
+            if (!DISCORD_WEBHOOK) {
+              console.log('DISCORD_WEBHOOK not set');
+              for (var i = 0; i < Math.min(newIssues.length, 10); i++) {
+                var iss = newIssues[i];
+                console.log('  [' + iss.category + '] ' + iss.repo + '#' + iss.number + ': ' + iss.title);
+                if (iss.summary) console.log('    → ' + iss.summary.split('\n')[0]);
+              }
+              return;
+            }
+
+            for (var batch = 0; batch < embeds.length; batch += 10) {
+              var chunk = embeds.slice(batch, batch + 10);
+              var payload = JSON.stringify({
+                username: 'Issue Finder',
+                content: batch === 0
+                  ? '## New: ' + newIssues.length + ' issues (unassigned, no PR)\n> Blockchain / Rust / AI-ML'
+                  : null,
+                embeds: chunk,
+              });
+
+              await new Promise(function(resolve, reject) {
+                var url = new URL(DISCORD_WEBHOOK);
+                var req = https.request({
+                  hostname: url.hostname,
+                  path: url.pathname,
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                }, function(res) {
+                  console.log(res.statusCode === 204 ? 'Discord OK' : 'Discord: ' + res.statusCode);
+                  resolve();
+                });
+                req.on('error', reject);
+                req.write(payload);
+                req.end();
+              });
+
+              if (batch + 10 < embeds.length) {
+                await new Promise(function(r) { setTimeout(r, 1000); });
+              }
+            }
+
+            saveNotifiedIssues(newIssues);
+            console.log('Done');
+
+      - name: Commit DB
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add notified-issues.md 2>/dev/null || true
+          git diff --staged --quiet || git commit -m "Update notified issues [skip ci]"
+          git push || true
