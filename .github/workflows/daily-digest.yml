@@ -1,0 +1,124 @@
+name: Daily Trend Digest
+
+on:
+  schedule:
+    # 크롤링: 매 2시간 (UTC)
+    - cron: '0 */2 * * *'
+    # 다이제스트: UTC 22:30 = KST 07:30
+    - cron: '30 22 * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: '실행 모드'
+        required: true
+        default: 'test'
+        type: choice
+        options:
+          - test
+          - crawl
+          - digest
+
+jobs:
+  # ─── 테스트 Job (크롤링→요약→Discord 한번에) ──
+  test:
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.mode == 'test')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run test
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          DISCORD_TREND_WEBHOOK: ${{ secrets.DISCORD_TREND_WEBHOOK }}
+        run: python test_run.py
+
+  # ─── 크롤링 Job ─────────────────────────────
+  crawl:
+    if: >-
+      (github.event.schedule == '0 */2 * * *') ||
+      (github.event_name == 'workflow_dispatch' && inputs.mode == 'crawl')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run crawler
+        run: python crawl.py
+
+      - name: Commit & force push data
+        run: |
+          git config user.name "trend-bot"
+          git config user.email "trend-bot@users.noreply.github.com"
+          git add data/posts.json
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit --amend -m "crawl-data: $(date -u +%Y-%m-%dT%H:%M)" || \
+              git commit -m "crawl-data: $(date -u +%Y-%m-%dT%H:%M)"
+            git push --force
+          fi
+
+  # ─── 다이제스트 Job ─────────────────────────
+  digest:
+    if: >-
+      (github.event.schedule == '30 22 * * *') ||
+      (github.event_name == 'workflow_dispatch' && inputs.mode == 'digest')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run digest
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          DISCORD_TREND_WEBHOOK: ${{ secrets.DISCORD_TREND_WEBHOOK }}
+        run: python digest.py
+
+      - name: Commit cleared data & force push
+        run: |
+          git config user.name "trend-bot"
+          git config user.email "trend-bot@users.noreply.github.com"
+          git add data/posts.json
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit --amend -m "crawl-data: cleared" || \
+              git commit -m "crawl-data: cleared"
+            git push --force
+          fi
